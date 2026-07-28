@@ -104,6 +104,8 @@ export SELKIES_MODE=webrtc
 
 Native mode installs `coturn` and Firefox on the host and uses the same default Launchable ports. It intentionally avoids the all-in-one Selkies desktop container so Docker commands inside the streamed desktop operate on the Brev host naturally. Firefox is installed from Mozilla's apt repository so the desktop gets a real `.deb` browser instead of Ubuntu's snap transition package.
 
+When `SELKIES_TURN_HOST` is auto-detected, native mode refreshes the advertised TURN host and coturn `external-ip` each time the systemd service starts. This keeps WebRTC reconnects working after a provider stop/start changes the instance public IP.
+
 Native mode defaults to the familiar Ubuntu GNOME desktop with Yaru styling and the left dock:
 
 ```bash

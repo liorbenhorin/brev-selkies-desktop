@@ -35,6 +35,7 @@ SELKIES_TURN_ENABLE_TCP="${SELKIES_TURN_ENABLE_TCP:-0}"
 SELKIES_TURN_HOST="${SELKIES_TURN_HOST:-}"
 SELKIES_TURN_EXTERNAL_IP="${SELKIES_TURN_EXTERNAL_IP:-${TURN_EXTERNAL_IP:-}}"
 SELKIES_AUTO_TURN_HOST="${SELKIES_AUTO_TURN_HOST:-1}"
+SELKIES_TURN_HOST_SOURCE="${SELKIES_TURN_HOST_SOURCE:-}"
 
 SELKIES_ENABLE_BASIC_AUTH="${SELKIES_ENABLE_BASIC_AUTH:-false}"
 SELKIES_BASIC_AUTH_USER="${SELKIES_BASIC_AUTH_USER:-ubuntu}"
@@ -565,11 +566,15 @@ resolve_turn_host() {
     return 0
   fi
   if [[ -n "$SELKIES_TURN_HOST" ]]; then
+    SELKIES_TURN_HOST_SOURCE="${SELKIES_TURN_HOST_SOURCE:-explicit}"
     SELKIES_TURN_EXTERNAL_IP="${SELKIES_TURN_EXTERNAL_IP:-$SELKIES_TURN_HOST}"
     return 0
   fi
   if is_truthy "$SELKIES_AUTO_TURN_HOST"; then
     SELKIES_TURN_HOST="$(detect_public_ipv4 || true)"
+    if [[ -n "$SELKIES_TURN_HOST" ]]; then
+      SELKIES_TURN_HOST_SOURCE="${SELKIES_TURN_HOST_SOURCE:-auto}"
+    fi
     SELKIES_TURN_EXTERNAL_IP="${SELKIES_TURN_EXTERNAL_IP:-$SELKIES_TURN_HOST}"
   fi
 }
@@ -751,6 +756,10 @@ SELKIES_ENABLE_BASIC_AUTH=${SELKIES_ENABLE_BASIC_AUTH}
 SELKIES_BASIC_AUTH_USER=${SELKIES_BASIC_AUTH_USER}
 SELKIES_BASIC_AUTH_PASSWORD=${REMOTE_DESKTOP_PASSWORD}
 SELKIES_TURN_HOST=${SELKIES_TURN_HOST}
+SELKIES_TURN_HOST_SOURCE=${SELKIES_TURN_HOST_SOURCE}
+SELKIES_TURN_EXTERNAL_IP=${SELKIES_TURN_EXTERNAL_IP}
+SELKIES_AUTO_TURN_HOST=${SELKIES_AUTO_TURN_HOST}
+PUBLIC_IP_URLS=${PUBLIC_IP_URLS@Q}
 SELKIES_TURN_PORT=${SELKIES_TURN_PORT}
 SELKIES_TURN_PROTOCOL=${SELKIES_TURN_PROTOCOL}
 SELKIES_TURN_USERNAME=${SELKIES_TURN_USERNAME}
@@ -791,6 +800,56 @@ EOF
 set -euo pipefail
 
 . /etc/brev-selkies-desktop/native.env
+
+is_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+detect_public_ipv4() {
+  local url ip
+  for url in ${PUBLIC_IP_URLS:-https://icanhazip.com https://api.ipify.org https://ifconfig.me/ip}; do
+    if ip="$(curl -fsSL --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]')" \
+      && [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      printf '%s\n' "$ip"
+      return 0
+    fi
+  done
+  return 1
+}
+
+refresh_auto_turn_host() {
+  local current_ip
+  [[ "${SELKIES_MODE}" == "webrtc" ]] || return 0
+  [[ "${SELKIES_TURN_HOST_SOURCE:-}" == "auto" ]] || return 0
+  is_truthy "${SELKIES_AUTO_TURN_HOST:-1}" || return 0
+
+  current_ip="$(detect_public_ipv4 || true)"
+  if [[ -z "$current_ip" ]]; then
+    echo "WARNING: could not refresh auto-detected Selkies TURN host; keeping ${SELKIES_TURN_HOST}" >&2
+    return 0
+  fi
+  if [[ "$current_ip" == "${SELKIES_TURN_HOST}" && "$current_ip" == "${SELKIES_TURN_EXTERNAL_IP:-}" ]]; then
+    return 0
+  fi
+
+  echo "Refreshing auto-detected Selkies TURN host to ${current_ip}" >&2
+  sed -i -E "s/^SELKIES_TURN_HOST=.*/SELKIES_TURN_HOST=${current_ip}/" /etc/brev-selkies-desktop/native.env
+  sed -i -E "s/^SELKIES_TURN_EXTERNAL_IP=.*/SELKIES_TURN_EXTERNAL_IP=${current_ip}/" /etc/brev-selkies-desktop/native.env
+  if grep -q '^external-ip=' /etc/turnserver.conf; then
+    sed -i -E "s/^external-ip=.*/external-ip=${current_ip}/" /etc/turnserver.conf
+  else
+    printf 'external-ip=%s\n' "$current_ip" >> /etc/turnserver.conf
+  fi
+  systemctl try-restart coturn.service >/dev/null 2>&1 || true
+
+  # shellcheck disable=SC1091
+  . /etc/brev-selkies-desktop/native.env
+}
+
+refresh_auto_turn_host
 
 export DISPLAY="${SELKIES_NATIVE_DISPLAY}"
 
