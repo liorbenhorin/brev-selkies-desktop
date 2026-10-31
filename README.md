@@ -170,15 +170,28 @@ After the native desktop passes its HTTP health check, the installer sets up:
 
 The owner is `SELKIES_NATIVE_USER` (default `ubuntu`). This setup targets x86_64 Ubuntu. For a new instance, Ubuntu 24.04 is recommended. Isaac Sim needs a supported NVIDIA RTX GPU and driver; an A100 or H100 can stream a desktop but cannot run Isaac Sim's RTX renderer. See [Isaac Sim requirements](https://docs.isaacsim.omniverse.nvidia.com/6.2.0/installation/requirements.html).
 
-Open a new terminal in the streamed desktop and launch:
+Connect through Brev: select your instance, then open **Secure Links → desktop** (port `8080`). The desktop can be used while the workspace packages are still installing. Wait for `Workspace ready` in the setup log before launching Isaac Sim.
+
+This is NVIDIA's **pip installation**, with the full standard GUI, viewport, editor, and extensions. It is installed in a uv-created Python 3.12 environment, not built from source or installed from the workstation archive.
+
+Open a fresh terminal in the streamed desktop and launch from **any directory**:
 
 ```bash
 isaacsim
 ```
 
-The launcher enables the ROS 2 bridge. First launch prompts for the NVIDIA Omniverse license agreement and may take time to compile shaders/download assets. Installation does not launch the simulator or accept that prompt automatically.
+No virtual-environment activation is needed. `~/.local/bin/isaacsim` invokes the environment's executable, enables the ROS 2 bridge, selects the bundled Humble/Jazzy libraries, and sets Fast DDS (`rmw_fastrtps_cpp`) by default. If you already activated the virtual environment, invoke `~/.local/bin/isaacsim` explicitly: its `bin/isaacsim` command bypasses our wrapper.
 
-In a separate terminal, activate ROS and build your packages:
+The launcher preserves `ROS_DOMAIN_ID`; leave it unset (domain `0`) or use the same value in both simulator and ROS terminals. First launch prompts for the NVIDIA Omniverse license agreement and may take time to compile shaders/download assets. Installation does not launch the simulator or accept that prompt automatically.
+
+In a **separate terminal**, activate the system ROS installation and any built workspace overlay:
+
+```bash
+source ~/robotics/ros2_ws/activate.bash
+ros2 topic list
+```
+
+`~/robotics/ros2_ws/src` starts empty: it is for your own packages. ROS itself is installed under `/opt/ros/humble` or `/opt/ros/jazzy`; the installer does not clone NVIDIA's ROS example workspace. Once you add packages under `src`, build them:
 
 ```bash
 source ~/robotics/ros2_ws/activate.bash
@@ -186,7 +199,7 @@ cd ~/robotics/ros2_ws
 colcon build --symlink-install
 ```
 
-ROS is deliberately not sourced in `.bashrc`. In particular, Ubuntu 22.04's native Humble uses Python 3.10, while Isaac Sim uses Python 3.12. The simulator uses its bundled ROS libraries when launched from a clean terminal. Custom ROS interfaces need a compatible Python 3.12 build; see [NVIDIA's ROS integration guide](https://docs.isaacsim.omniverse.nvidia.com/6.2.0/installation/install_ros.html).
+ROS is deliberately not sourced in `.bashrc`. In particular, Ubuntu 22.04's native Humble uses Python 3.10, while Isaac Sim uses Python 3.12. The launcher explicitly selects the simulator's bundled ROS libraries before starting it. Enabling the bridge alone does not publish scene data: load a ROS-enabled example or configure publishers/subscribers in your scene. Custom ROS interfaces need a compatible Python 3.12 build; see [NVIDIA's ROS integration guide](https://docs.isaacsim.omniverse.nvidia.com/6.2.0/installation/install_ros.html).
 
 To retry only the workspace setup after a failed download, without restarting the desktop:
 
@@ -197,6 +210,19 @@ sudo -E bash assets/brev-selkies-desktop.sh --setup-workspace
 Reruns reuse the Isaac Sim virtual environment and keep ROS source files. uv/Pixi installers update their binaries; package installation rechecks the pinned Isaac Sim dependencies. The initial download is large, so allow ample disk space and deployment time.
 
 To deploy just the desktop, set `SELKIES_NATIVE_WORKSPACE=0`. Container deployments do not run workspace setup.
+
+### Installation status and validation
+
+For the background jobs used when recovering this instance:
+
+```bash
+sudo systemctl show brev-workspace-setup -p ActiveState -p ExecMainStatus
+sudo tail -n 30 /var/log/brev-workspace-setup.log
+```
+
+The initial full deployment was logged to `/var/log/brev-robotics-setup.log`. These job names/logs apply to the manual systemd-run recovery; ordinary Launchables expose their output in Brev. An inactive setup job with `ExecMainStatus=0` and `Workspace ready` means it completed successfully.
+
+The recovered Ubuntu 22.04 instance was verified with uv, Pixi, Isaac Sim `6.2.0.0`, PyTorch `2.11.0+cu128`, an actual CUDA tensor computation on the RTX PRO 6000 Blackwell, and ROS 2 Humble initialization. A subsequent bridge startup failure was traced to the bundled Fast DDS library lookup. The updated launcher passes Isaac Sim's own ROS checker with the bundled path explicitly set. Full scene/topic communication still needs validation in your simulation.
 
 ## Authentication
 
@@ -224,6 +250,35 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 ```
 
 ## Troubleshooting
+
+### Isaac Sim: ROS2 Bridge startup failed
+
+If Isaac Sim prints instructions to set `ROS_DISTRO`, `RMW_IMPLEMENTATION`, and `LD_LIBRARY_PATH`, close that Isaac Sim process and relaunch using the updated `~/.local/bin/isaacsim` wrapper. These library paths must be present **before** the process starts; sourcing the system Humble workspace inside the simulator terminal is not the fix.
+
+For an existing Ubuntu 22.04 installation without the updated wrapper, use a fresh terminal:
+
+```bash
+export ROS_DISTRO=humble
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+sim_env="$HOME/robotics/isaacsim-6.2/.venv"
+ros_lib="$sim_env/lib/python3.12/site-packages/isaacsim/exts/isaacsim.ros2.core/humble/lib"
+export LD_LIBRARY_PATH="$ros_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+"$sim_env/bin/isaacsim" --enable isaacsim.ros2.bridge
+```
+
+On Ubuntu 24.04, use `jazzy` for both the distribution and library directory. Fast DDS is the configured default for external ROS nodes too. If choosing Cyclone DDS, set `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` in both terminals and install the corresponding system ROS RMW package for external nodes.
+
+Check the bundled middleware without starting the GUI:
+
+```bash
+~/.local/bin/isaacsim --check-ros
+```
+
+A zero exit status means Isaac Sim's ROS middleware check passed. The installer now runs this check too.
+
+After relaunching, check the Isaac Sim log for bridge startup success, then load a ROS-enabled scene and check its expected topics from the separate ROS terminal. Merely seeing the GUI or passing `pip check` does not validate the bridge.
+
+### Native desktop recovery
 
 `Downloading Selkies-GStreamer portable release v2.1.0` followed by HTTP 404 means an older copy of this script is running. Selkies 2.x replaced GStreamer and no longer publishes that archive. Use this fork's updated script; setting `SELKIES_NATIVE_VERSION=1.6.2` alone does not fix the removed upstream release. The native service now uses the 2.x launcher, hyphenated CLI flags, and `h264enc`.
 

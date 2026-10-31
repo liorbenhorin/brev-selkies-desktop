@@ -1121,13 +1121,40 @@ fi
 cat > "$HOME/.local/bin/isaacsim" <<'LAUNCH'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "${ROS_DISTRO:-}" == humble ]]; then
-  echo 'Launch Isaac Sim from a fresh terminal without sourcing Humble (Python 3.10).' >&2
+sim_env="$HOME/robotics/isaacsim-6.2/.venv"
+# System Humble's Python 3.10 modules cannot be loaded by Isaac's Python 3.12.
+if [[ "${PYTHONPATH:-}:${AMENT_PREFIX_PATH:-}" == *"/opt/ros/humble"* ]]; then
+  echo 'Launch Isaac Sim from a fresh terminal without sourcing system Humble (Python 3.10).' >&2
   exit 1
 fi
-exec "$HOME/robotics/isaacsim-6.2/.venv/bin/isaacsim" --enable isaacsim.ros2.bridge "$@"
+if [[ -z "${ROS_DISTRO:-}" ]]; then
+  . /etc/os-release
+  case "${VERSION_ID}" in
+    22.04) export ROS_DISTRO=humble ;;
+    24.04) export ROS_DISTRO=jazzy ;;
+    *) echo 'Set ROS_DISTRO to humble or jazzy for the bundled ROS bridge.' >&2; exit 1 ;;
+  esac
+fi
+case "$ROS_DISTRO" in
+  humble|jazzy) ;;
+  *) echo "Unsupported bundled ROS distribution: $ROS_DISTRO" >&2; exit 1 ;;
+esac
+export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
+site_packages="$("$sim_env/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+ros_lib="$site_packages/isaacsim/exts/isaacsim.ros2.core/$ROS_DISTRO/lib"
+[[ -d "$ros_lib" ]] || { echo "Bundled ROS libraries not found: $ros_lib" >&2; exit 1; }
+case ":${LD_LIBRARY_PATH:-}:" in
+  *":$ros_lib:"*) ;;
+  *) export LD_LIBRARY_PATH="$ros_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+esac
+if [[ "${1:-}" == --check-ros ]]; then
+  cd "$site_packages/isaacsim/exts/isaacsim.ros2.core/bin"
+  exec ./isaacsim.ros2.core.check ''
+fi
+exec "$sim_env/bin/isaacsim" --enable isaacsim.ros2.bridge "$@"
 LAUNCH
 chmod +x "$HOME/.local/bin/isaacsim"
+"$HOME/.local/bin/isaacsim" --check-ros
 printf 'source /opt/ros/%s/setup.bash\n' "$distro" > "$workspace_dir/ros2_ws/activate.bash"
 cat >> "$workspace_dir/ros2_ws/activate.bash" <<'ROS'
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp

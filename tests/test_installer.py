@@ -112,6 +112,52 @@ main
                           REMOTE_DESKTOP_PASSWORD='a space; $(false) $UNSET_VAR "quote"')
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    def run_launcher(self, **env):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            venv = root / 'robotics/isaacsim-6.2/.venv'
+            bin_dir = venv / 'bin'
+            bin_dir.mkdir(parents=True)
+            site = venv / 'lib/python3.12/site-packages'
+            core = site / 'isaacsim/exts/isaacsim.ros2.core'
+            (core / 'humble/lib').mkdir(parents=True)
+            (core / 'bin').mkdir()
+            python = bin_dir / 'python'
+            python.write_text(f'#!/bin/sh\nprintf "%s\\n" "{site}"\n')
+            python.chmod(0o755)
+            sim = bin_dir / 'isaacsim'
+            sim.write_text('#!/bin/bash\nprintf "%s\\n" "$ROS_DISTRO" "$RMW_IMPLEMENTATION" "$LD_LIBRARY_PATH" "$@"\n')
+            sim.chmod(0o755)
+            launcher = SOURCE.split("<<'LAUNCH'\n", 1)[1].split('\nLAUNCH\n', 1)[0]
+            launcher = launcher.replace('$HOME', str(root))
+            clean = {k: v for k, v in os.environ.items() if k not in (
+                'ROS_DISTRO', 'RMW_IMPLEMENTATION', 'PYTHONPATH', 'AMENT_PREFIX_PATH', 'LD_LIBRARY_PATH')}
+            result = subprocess.run(['bash', '-c', launcher, 'launcher', '--test-argument'],
+                                    env={**clean, 'ROS_DISTRO': 'humble', **env}, text=True, capture_output=True)
+            return result, str(core / 'humble/lib')
+
+    def test_sim_launcher_selects_bundled_fastdds(self):
+        result, library = self.run_launcher(LD_LIBRARY_PATH='/custom/lib')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            'humble', 'rmw_fastrtps_cpp', library + ':/custom/lib',
+            '--enable', 'isaacsim.ros2.bridge', '--test-argument'])
+
+    def test_sim_launcher_preserves_explicit_middleware(self):
+        result, _ = self.run_launcher(RMW_IMPLEMENTATION='rmw_cyclonedds_cpp')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('rmw_cyclonedds_cpp', result.stdout)
+
+    def test_sim_launcher_rejects_system_humble_python(self):
+        result, _ = self.run_launcher(PYTHONPATH='/opt/ros/humble/local/lib/python3.10/dist-packages')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('fresh terminal', result.stderr)
+
+    def test_sim_launcher_rejects_missing_bundled_distro(self):
+        result, _ = self.run_launcher(ROS_DISTRO='jazzy')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Bundled ROS libraries not found', result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()
