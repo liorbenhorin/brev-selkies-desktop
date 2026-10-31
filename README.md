@@ -1,6 +1,6 @@
 # Brev Selkies Desktop
 
-Minimal Launchable assets for running a browser-based Selkies desktop on Brev.
+Personal Brev Launchable for a native Selkies desktop and robotics development environment.
 
 This repository is intentionally Selkies-only. It does not include NV Streamer packages, NV Streamer service recovery, or driver-alignment logic.
 
@@ -20,18 +20,18 @@ Use this as the Brev Launchable user script:
 set -euo pipefail
 
 export SELKIES_ACCELERATION=auto
-export SELKIES_DEPLOYMENT=container
+export SELKIES_DEPLOYMENT=native
 export SELKIES_MODE=webrtc
 
-curl -fsSL "https://raw.githubusercontent.com/Shiftius/brev-selkies-desktop/main/assets/brev-selkies-desktop.sh" | sudo -E bash
+curl -fsSL "https://raw.githubusercontent.com/liorbenhorin/brev-selkies-desktop/main/assets/brev-selkies-desktop.sh" | sudo -E bash
 ```
 
 ## Modes
 
 `SELKIES_DEPLOYMENT` controls where the desktop runs:
 
-- `container`, default: run the Selkies all-in-one desktop image.
-- `native`: host install that runs an Ubuntu GNOME desktop, Selkies-GStreamer, coturn, and Docker directly on the Brev host with systemd services.
+- `container`: run the Selkies all-in-one desktop image.
+- `native`, default: host install that runs an Ubuntu GNOME desktop, Selkies 2.1, coturn, and Docker directly on the Brev host with systemd services.
 
 Container deployment also enables host Docker access by default:
 
@@ -48,15 +48,17 @@ export SELKIES_HOST_DOCKER=0
 `SELKIES_ACCELERATION` controls encode/runtime behavior:
 
 - `auto`, default: use NVIDIA hardware acceleration when required GPU prerequisites are healthy; otherwise use software acceleration.
-- `hardware`: require NVIDIA GPU readiness, default `SELKIES_ENCODER=nvh264enc`, and use the NVIDIA GLX desktop image for container mode.
-- `software`: do not request Docker GPU access, default `SELKIES_ENCODER=x264enc`, and use the NVIDIA EGL desktop image for its software fallback path.
+- `hardware`: require NVIDIA GPU readiness, default `SELKIES_ENCODER=nvh264enc` in container mode, and use the NVIDIA GLX desktop image for container mode.
+- `software`: do not request Docker GPU access, default `SELKIES_ENCODER=x264enc` in container mode, and use the NVIDIA EGL desktop image for its software fallback path.
+
+Native Selkies 2.x uses `h264enc` with hardware encoding when available, or `--use-cpu=true` for software mode.
 
 In container mode, hardware also requires a healthy NVIDIA container runtime and runs Docker with `--gpus all`. In native mode, hardware requires an NVIDIA-backed Xorg display; the script installs or verifies the matching NVIDIA Xorg driver before choosing hardware mode.
 
 `SELKIES_MODE` controls the browser transport:
 
 - `webrtc`, default: lower-latency Selkies WebRTC. Requires `8080/tcp` plus TURN UDP ports.
-- `kasmvnc`: single-port fallback over `8080/tcp`.
+- `kasmvnc`: container-only single-port fallback over `8080/tcp`.
 
 ## Ports
 
@@ -88,9 +90,10 @@ Force software acceleration:
 export SELKIES_ACCELERATION=software
 ```
 
-Use single-port KasmVNC fallback:
+Use single-port KasmVNC fallback in container mode:
 
 ```bash
+export SELKIES_DEPLOYMENT=container
 export SELKIES_MODE=kasmvnc
 ```
 
@@ -118,10 +121,10 @@ The previous lightweight desktop remains available when install size or simplici
 export SELKIES_NATIVE_DESKTOP=xfce
 ```
 
-Native mode downloads the latest `selkies-project/selkies` portable release by default. Pin it when testing a specific Selkies release:
+Native mode pins Selkies **2.1.0** and downloads its official standalone AppImage, verifies the release SHA-256 checksum, and extracts it to `/opt/selkies` (no FUSE required). The download is staged before stopping an existing desktop. To select another compatible 2.x release:
 
 ```bash
-export SELKIES_NATIVE_VERSION=1.6.2
+export SELKIES_NATIVE_VERSION=2.1.0
 ```
 
 Package index refreshes and installs use bounded retries so transient Ubuntu mirror errors do not abort the Launchable after one failed download. The defaults are four outer attempts, three apt acquisition retries per attempt, a 15-second delay between attempts, and up to 120 seconds for a competing dpkg lock to clear. Override them only when the environment needs a different startup budget:
@@ -156,6 +159,45 @@ export SELKIES_HARDWARE_IMAGE="ghcr.io/selkies-project/nvidia-glx-desktop"
 export SELKIES_SOFTWARE_IMAGE="ghcr.io/selkies-project/nvidia-egl-desktop"
 ```
 
+## Native robotics workspace
+
+After the native desktop passes its HTTP health check, the installer sets up:
+
+- **uv and Pixi** in `/usr/local/bin`, using their official installers.
+- **Isaac Sim 6.2.0.0**, including extension caches and ROS integration, in `~/robotics/isaacsim-6.2/.venv`. uv supplies Python 3.12; the environment installs PyTorch 2.11.0 with CUDA 12.8 and NVIDIA's pip packages.
+- **ROS 2 Desktop** and development tools: Humble on Ubuntu 22.04, Jazzy on Ubuntu 24.04. Includes RViz, colcon, and initialized rosdep.
+- A user-owned ROS workspace at `~/robotics/ros2_ws/src`.
+
+The owner is `SELKIES_NATIVE_USER` (default `ubuntu`). This setup targets x86_64 Ubuntu. For a new instance, Ubuntu 24.04 is recommended. Isaac Sim needs a supported NVIDIA RTX GPU and driver; an A100 or H100 can stream a desktop but cannot run Isaac Sim's RTX renderer. See [Isaac Sim requirements](https://docs.isaacsim.omniverse.nvidia.com/6.2.0/installation/requirements.html).
+
+Open a new terminal in the streamed desktop and launch:
+
+```bash
+isaacsim
+```
+
+The launcher enables the ROS 2 bridge. First launch prompts for the NVIDIA Omniverse license agreement and may take time to compile shaders/download assets. Installation does not launch the simulator or accept that prompt automatically.
+
+In a separate terminal, activate ROS and build your packages:
+
+```bash
+source ~/robotics/ros2_ws/activate.bash
+cd ~/robotics/ros2_ws
+colcon build --symlink-install
+```
+
+ROS is deliberately not sourced in `.bashrc`. In particular, Ubuntu 22.04's native Humble uses Python 3.10, while Isaac Sim uses Python 3.12. The simulator uses its bundled ROS libraries when launched from a clean terminal. Custom ROS interfaces need a compatible Python 3.12 build; see [NVIDIA's ROS integration guide](https://docs.isaacsim.omniverse.nvidia.com/6.2.0/installation/install_ros.html).
+
+To retry only the workspace setup after a failed download, without restarting the desktop:
+
+```bash
+sudo -E bash assets/brev-selkies-desktop.sh --setup-workspace
+```
+
+Reruns reuse the Isaac Sim virtual environment and keep ROS source files. uv/Pixi installers update their binaries; package installation rechecks the pinned Isaac Sim dependencies. The initial download is large, so allow ample disk space and deployment time.
+
+To deploy just the desktop, set `SELKIES_NATIVE_WORKSPACE=0`. Container deployments do not run workspace setup.
+
 ## Authentication
 
 The default is:
@@ -175,11 +217,21 @@ export REMOTE_DESKTOP_PASSWORD="choose-a-strong-password"
 
 ```bash
 bash -n assets/brev-selkies-desktop.sh
-SELKIES_ACCELERATION=software assets/brev-selkies-desktop.sh --print-config
+SELKIES_DEPLOYMENT=container SELKIES_ACCELERATION=software assets/brev-selkies-desktop.sh --print-config
 SELKIES_DEPLOYMENT=native assets/brev-selkies-desktop.sh --print-config
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+(cd assets && sha256sum -c SHA256SUMS)
 ```
 
 ## Troubleshooting
+
+`Downloading Selkies-GStreamer portable release v2.1.0` followed by HTTP 404 means an older copy of this script is running. Selkies 2.x replaced GStreamer and no longer publishes that archive. Use this fork's updated script; setting `SELKIES_NATIVE_VERSION=1.6.2` alone does not fix the removed upstream release. The native service now uses the 2.x launcher, hyphenated CLI flags, and `h264enc`.
+
+Native service logs:
+
+```bash
+journalctl -u brev-selkies-native.service -b -n 200
+```
 
 If the first stream works but refresh/reconnect later fails while the container still looks healthy, check the container log:
 
@@ -189,9 +241,12 @@ docker exec brev-selkies-desktop tail -n 200 /tmp/selkies-gstreamer-entrypoint.l
 
 Messages such as `create_relay_ioa_sockets: no available ports` or `ALLOCATE processed, error 508: Cannot create socket` mean the exposed TURN relay range is too small. Expose the full default range, `47998-48015/udp`, and rerun the Launchable.
 
-Selkies WebRTC is intended for one active browser session per desktop. Opening the same remote desktop from multiple browsers or users at the same time can disconnect or take over the existing session. Treat multi-user collaboration as unsupported for this Launchable, similar to the earlier NV Streamer desktop path.
+The legacy container images are intended for one active browser session per desktop. Opening the same remote desktop from multiple browsers or users at the same time can disconnect or take over the existing session. Treat multi-user collaboration as unsupported for this Launchable, similar to the earlier NV Streamer desktop path.
 
 ## References
+
+- [Selkies 2.x native installation](https://docs.selkies.io/latest/native/)
+- [Isaac Sim 6.2 Python installation](https://docs.isaacsim.omniverse.nvidia.com/6.2.0/installation/install_python.html)
 
 - [docker-selkies-egl-desktop](https://github.com/selkies-project/docker-selkies-egl-desktop)
 - [docker-selkies-glx-desktop](https://github.com/selkies-project/docker-selkies-glx-desktop)

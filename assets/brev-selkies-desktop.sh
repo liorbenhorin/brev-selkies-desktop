@@ -9,16 +9,17 @@ SELKIES_HARDWARE_IMAGE="${SELKIES_HARDWARE_IMAGE:-ghcr.io/selkies-project/nvidia
 SELKIES_SOFTWARE_IMAGE="${SELKIES_SOFTWARE_IMAGE:-ghcr.io/selkies-project/nvidia-egl-desktop}"
 SELKIES_TAG="${SELKIES_TAG:-}"
 SELKIES_CONTAINER_NAME="${SELKIES_CONTAINER_NAME:-brev-selkies-desktop}"
-SELKIES_DEPLOYMENT="${SELKIES_DEPLOYMENT:-container}"
+SELKIES_DEPLOYMENT="${SELKIES_DEPLOYMENT:-native}"
 SELKIES_HOST_DOCKER="${SELKIES_HOST_DOCKER:-1}"
 SELKIES_MODE="${SELKIES_MODE:-webrtc}"
 SELKIES_ACCELERATION="${SELKIES_ACCELERATION:-auto}"
 SELKIES_ENCODER="${SELKIES_ENCODER:-}"
 SELKIES_DOCKER_NETWORK="${SELKIES_DOCKER_NETWORK:-auto}"
 SELKIES_NATIVE_USER="${SELKIES_NATIVE_USER:-ubuntu}"
+SELKIES_NATIVE_WORKSPACE="${SELKIES_NATIVE_WORKSPACE:-1}"
 SELKIES_NATIVE_DISPLAY="${SELKIES_NATIVE_DISPLAY:-:99}"
-SELKIES_NATIVE_DIR="${SELKIES_NATIVE_DIR:-/opt/selkies-gstreamer}"
-SELKIES_NATIVE_VERSION="${SELKIES_NATIVE_VERSION:-}"
+SELKIES_NATIVE_DIR="${SELKIES_NATIVE_DIR:-/opt/selkies}"
+SELKIES_NATIVE_VERSION="${SELKIES_NATIVE_VERSION:-2.1.0}"
 SELKIES_NATIVE_X_SERVER="${SELKIES_NATIVE_X_SERVER:-auto}"
 SELKIES_NATIVE_DESKTOP="${SELKIES_NATIVE_DESKTOP:-ubuntu}"
 SELKIES_TURN_REALM="${SELKIES_TURN_REALM:-brev-selkies-desktop}"
@@ -62,7 +63,7 @@ APT_UPDATED=0
 
 usage() {
   cat <<EOF
-Usage: ${PROGRAM_NAME} [--help|--print-config]
+Usage: ${PROGRAM_NAME} [--help|--print-config|--setup-workspace]
 
 Install a Selkies browser desktop on Brev.
 
@@ -71,16 +72,19 @@ Core settings:
     auto chooses hardware when required NVIDIA prerequisites are available;
     otherwise software.
     hardware uses nvh264enc and Docker --gpus all in container mode.
-    software uses x264enc and does not request Docker GPU access.
+    Container software uses x264enc and does not request Docker GPU access.
   SELKIES_DEPLOYMENT=container|native
     container runs the Selkies desktop image. native installs host Selkies,
     coturn, and a host Ubuntu GNOME or XFCE desktop with systemd services.
+  SELKIES_NATIVE_WORKSPACE=1|0
+    Install uv, Pixi, Isaac Sim 6.2, and ROS 2 after native desktop healthcheck.
+    Use --setup-workspace to install/retry only the workspace for the native user.
   SELKIES_HOST_DOCKER=1|0
     Container deployment only. When enabled, mount the host Docker socket into
     the desktop so Docker commands from the desktop control the Brev host.
   SELKIES_NATIVE_VERSION=<selkies release>
-    Native deployment only. Defaults to the latest selkies-project/selkies
-    GitHub release, for example 1.6.2.
+    Native deployment only. Defaults to 2.1.0 (standalone AppImage).
+    The old GStreamer 1.x runtime is not supported by this native launcher.
   SELKIES_NATIVE_X_SERVER=auto|nvidia|xvfb
     Native deployment only. auto uses NVIDIA Xorg for hardware mode and Xvfb
     for software mode.
@@ -91,7 +95,8 @@ Core settings:
     webrtc uses 8080/tcp plus TURN ports.
     kasmvnc uses only 8080/tcp and is the last-resort single-port mode.
   SELKIES_ENCODER=<gstreamer encoder>
-    Optional override, for example nvh264enc, x264enc, vp8enc, or vp9enc.
+    Native defaults to h264enc; software mode also passes --use-cpu=true.
+    Container defaults remain nvh264enc (hardware) or x264enc (software).
   SELKIES_IMAGE=<image>
     Optional override. When unset, hardware mode uses SELKIES_HARDWARE_IMAGE
     and software mode uses SELKIES_SOFTWARE_IMAGE.
@@ -166,6 +171,14 @@ validate_config() {
     ubuntu|xfce) ;;
     *) die "SELKIES_NATIVE_DESKTOP must be ubuntu or xfce; got '${SELKIES_NATIVE_DESKTOP}'" ;;
   esac
+  if [[ "$SELKIES_DEPLOYMENT" == native ]]; then
+    [[ "$SELKIES_MODE" == webrtc ]] || die "Native deployment supports webrtc only"
+    [[ "${SELKIES_NATIVE_VERSION#v}" =~ ^2\.[0-9]+\.[0-9]+$ ]] || die "Native deployment requires a Selkies 2.x release, such as 2.1.0"
+    [[ "$SELKIES_NATIVE_DIR" == /opt/* && "$SELKIES_NATIVE_DIR" != *..* && "$SELKIES_NATIVE_DIR" != /opt/ ]] || die "SELKIES_NATIVE_DIR must be a directory below /opt"
+    if is_truthy "$SELKIES_ENABLE_BASIC_AUTH"; then
+      [[ -n "$REMOTE_DESKTOP_PASSWORD" ]] || die "REMOTE_DESKTOP_PASSWORD is required when basic auth is enabled"
+    fi
+  fi
   [[ "$SELKIES_TURN_MIN_PORT" =~ ^[0-9]+$ ]] || die "SELKIES_TURN_MIN_PORT must be numeric"
   [[ "$SELKIES_TURN_MAX_PORT" =~ ^[0-9]+$ ]] || die "SELKIES_TURN_MAX_PORT must be numeric"
   [[ "$SELKIES_MIN_RELAY_PORT_COUNT" =~ ^[0-9]+$ ]] || die "SELKIES_MIN_RELAY_PORT_COUNT must be numeric"
@@ -414,6 +427,10 @@ resolve_encoder() {
     printf '%s\n' "$SELKIES_ENCODER"
     return 0
   fi
+  if [[ "$SELKIES_DEPLOYMENT" == native ]]; then
+    printf '%s\n' h264enc
+    return 0
+  fi
   case "$acceleration" in
     hardware) printf '%s\n' nvh264enc ;;
     software) printf '%s\n' x264enc ;;
@@ -451,7 +468,7 @@ resolve_turn_password() {
     return 0
   fi
   if [[ -r /etc/brev-selkies-desktop/native.env ]]; then
-    awk -F= '$1 == "SELKIES_TURN_PASSWORD" { print substr($0, index($0, "=") + 1); found=1 } END { exit(found ? 0 : 1) }' /etc/brev-selkies-desktop/native.env 2>/dev/null && return 0
+    bash -eu -c 'source /etc/brev-selkies-desktop/native.env; [[ -n "$SELKIES_TURN_PASSWORD" ]]; printf "%s\n" "$SELKIES_TURN_PASSWORD"' 2>/dev/null && return 0
   fi
   if command -v openssl >/dev/null 2>&1; then
     openssl rand -hex 24
@@ -469,22 +486,13 @@ resolve_network() {
   fi
 }
 
-latest_selkies_version() {
-  local tag
-  tag="$(curl -fsSL --max-time 10 https://api.github.com/repos/selkies-project/selkies/releases/latest \
-    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' \
-    | head -n 1)"
-  [[ -n "$tag" ]] || die "Could not resolve latest Selkies release version"
-  printf '%s\n' "$tag"
-}
-
 resolve_install_version() {
   case "$SELKIES_DEPLOYMENT" in
     container)
       printf '%s\n' "${SELKIES_TAG:-$(ubuntu_version)}"
       ;;
     native)
-      printf '%s\n' "${SELKIES_NATIVE_VERSION:-$(latest_selkies_version)}"
+      printf '%s\n' "${SELKIES_NATIVE_VERSION#v}"
       ;;
   esac
 }
@@ -639,8 +647,12 @@ docker_port_args() {
 
 healthcheck() {
   local attempt
+  local auth_args=()
+  if is_truthy "$SELKIES_ENABLE_BASIC_AUTH"; then
+    auth_args=( --user "${SELKIES_BASIC_AUTH_USER}:${REMOTE_DESKTOP_PASSWORD}" )
+  fi
   for attempt in $(seq 1 "$HEALTHCHECK_ATTEMPTS"); do
-    if curl -fsS "http://127.0.0.1:${SELKIES_WEB_PORT}/" >/dev/null 2>&1; then
+    if curl --connect-timeout 5 --max-time 10 "${auth_args[@]}" -fsS "http://127.0.0.1:${SELKIES_WEB_PORT}/" >/dev/null 2>&1; then
       log "Healthcheck passed on http://127.0.0.1:${SELKIES_WEB_PORT}/"
       return 0
     fi
@@ -666,6 +678,7 @@ SELKIES_MODE=${SELKIES_MODE}
 SELKIES_ACCELERATION=${SELKIES_ACCELERATION}
 SELKIES_DOCKER_NETWORK=${SELKIES_DOCKER_NETWORK}
 SELKIES_NATIVE_USER=${SELKIES_NATIVE_USER}
+SELKIES_NATIVE_WORKSPACE=${SELKIES_NATIVE_WORKSPACE}
 SELKIES_NATIVE_DISPLAY=${SELKIES_NATIVE_DISPLAY}
 SELKIES_NATIVE_VERSION=${SELKIES_NATIVE_VERSION}
 SELKIES_NATIVE_X_SERVER=${SELKIES_NATIVE_X_SERVER}
@@ -680,6 +693,25 @@ APT_RETRY_DELAY_SECONDS=${APT_RETRY_DELAY_SECONDS}
 APT_ACQUIRE_RETRIES=${APT_ACQUIRE_RETRIES}
 APT_LOCK_TIMEOUT_SECONDS=${APT_LOCK_TIMEOUT_SECONDS}
 EOF
+}
+
+# Stage and verify the complete release before stopping the running desktop.
+prepare_native_runtime() {
+  local version="$1" asset url digest
+  [[ "$(uname -m)" == x86_64 ]] || die "Native deployment currently requires x86_64"
+  asset="selkies-${version}-x86_64.AppImage"
+  url="https://github.com/selkies-project/selkies/releases/download/${version}"
+  NATIVE_STAGING="$(mktemp -d)"
+  trap 'rm -rf -- "${NATIVE_STAGING:-}"' EXIT
+  log "Downloading Selkies ${version} AppImage"
+  curl -fSL --retry 3 "${url}/${asset}" -o "${NATIVE_STAGING}/${asset}"
+  curl -fsSL --retry 3 "${url}/SHA256SUMS" -o "${NATIVE_STAGING}/SHA256SUMS"
+  digest="$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1 }' "${NATIVE_STAGING}/SHA256SUMS")"
+  [[ "$digest" =~ ^[[:xdigit:]]{64}$ ]] || die "Missing or invalid release checksum for ${asset}"
+  printf '%s  %s\n' "$digest" "$NATIVE_STAGING/$asset" | sha256sum --check -
+  chmod +x "${NATIVE_STAGING}/${asset}"
+  (cd "$NATIVE_STAGING" && "./${asset}" --appimage-extract >/dev/null)
+  [[ -x "${NATIVE_STAGING}/squashfs-root/AppRun" ]] || die "Selkies AppImage has no executable AppRun"
 }
 
 install_native_desktop() {
@@ -697,7 +729,7 @@ install_native_desktop() {
   SELKIES_TURN_PASSWORD="$turn_password"
 
   log "Installing native Selkies host desktop for user ${SELKIES_NATIVE_USER}"
-  log "Native mode installs host desktop packages, portable Selkies-GStreamer, coturn, and systemd services."
+  log "Native mode installs host desktop packages, Selkies 2.x, coturn, and systemd services."
   log "Native mode leaves Docker on the Brev host; users are not inside a desktop container."
   log "Native desktop requested: ${SELKIES_NATIVE_DESKTOP}"
   native_desktop_packages=(
@@ -729,11 +761,11 @@ install_native_desktop() {
   native_x_server="$(resolve_native_x_server "$acceleration")"
   log "Native X server requested: ${SELKIES_NATIVE_X_SERVER}; resolved: ${native_x_server}"
 
-  log "Downloading Selkies-GStreamer portable release v${version}"
-  rm -rf "$SELKIES_NATIVE_DIR"
-  curl -fsSL "https://github.com/selkies-project/selkies/releases/download/v${version}/selkies-gstreamer-portable-v${version}_amd64.tar.gz" \
-    | tar -xzf - -C /opt
-  [[ -x "${SELKIES_NATIVE_DIR}/selkies-gstreamer-run" ]] || die "Selkies portable runner was not installed at ${SELKIES_NATIVE_DIR}/selkies-gstreamer-run"
+  log "Installing verified Selkies ${version} runtime at ${SELKIES_NATIVE_DIR}"
+  mkdir -p "$SELKIES_NATIVE_DIR"
+  cp -a "${NATIVE_STAGING}/squashfs-root/." "$SELKIES_NATIVE_DIR/"
+  rm -rf -- "$NATIVE_STAGING"
+  NATIVE_STAGING=""
 
   mkdir -p /etc/brev-selkies-desktop
   chmod 755 /etc/brev-selkies-desktop
@@ -742,31 +774,31 @@ install_native_desktop() {
     log "Writing NVIDIA Xorg config with BusID ${nvidia_bus_id}"
     write_nvidia_xorg_config "$nvidia_bus_id" /etc/brev-selkies-desktop/xorg-nvidia.conf
   fi
-  cat > /etc/brev-selkies-desktop/native.env <<EOF
-SELKIES_NATIVE_USER=${SELKIES_NATIVE_USER}
-SELKIES_WEB_PORT=${SELKIES_WEB_PORT}
-SELKIES_MODE=${SELKIES_MODE}
-SELKIES_ACCELERATION=${acceleration}
-SELKIES_ENCODER=${encoder}
-SELKIES_NATIVE_DISPLAY=${SELKIES_NATIVE_DISPLAY}
-SELKIES_NATIVE_DIR=${SELKIES_NATIVE_DIR}
-SELKIES_NATIVE_X_SERVER=${native_x_server}
-SELKIES_NATIVE_DESKTOP=${SELKIES_NATIVE_DESKTOP}
-SELKIES_ENABLE_BASIC_AUTH=${SELKIES_ENABLE_BASIC_AUTH}
-SELKIES_BASIC_AUTH_USER=${SELKIES_BASIC_AUTH_USER}
-SELKIES_BASIC_AUTH_PASSWORD=${REMOTE_DESKTOP_PASSWORD}
-SELKIES_TURN_HOST=${SELKIES_TURN_HOST}
-SELKIES_TURN_HOST_SOURCE=${SELKIES_TURN_HOST_SOURCE}
-SELKIES_TURN_EXTERNAL_IP=${SELKIES_TURN_EXTERNAL_IP}
-SELKIES_AUTO_TURN_HOST=${SELKIES_AUTO_TURN_HOST}
-PUBLIC_IP_URLS=${PUBLIC_IP_URLS@Q}
-SELKIES_TURN_PORT=${SELKIES_TURN_PORT}
-SELKIES_TURN_PROTOCOL=${SELKIES_TURN_PROTOCOL}
-SELKIES_TURN_USERNAME=${SELKIES_TURN_USERNAME}
-SELKIES_TURN_PASSWORD=${SELKIES_TURN_PASSWORD}
-SELKIES_DISPLAY_WIDTH=${SELKIES_DISPLAY_WIDTH}
-SELKIES_DISPLAY_HEIGHT=${SELKIES_DISPLAY_HEIGHT}
-EOF
+  {
+    printf '%s=%q\n' SELKIES_NATIVE_USER "${SELKIES_NATIVE_USER}"
+    printf '%s=%q\n' SELKIES_WEB_PORT "${SELKIES_WEB_PORT}"
+    printf '%s=%q\n' SELKIES_MODE "${SELKIES_MODE}"
+    printf '%s=%q\n' SELKIES_ACCELERATION "${acceleration}"
+    printf '%s=%q\n' SELKIES_ENCODER "${encoder}"
+    printf '%s=%q\n' SELKIES_NATIVE_DISPLAY "${SELKIES_NATIVE_DISPLAY}"
+    printf '%s=%q\n' SELKIES_NATIVE_DIR "${SELKIES_NATIVE_DIR}"
+    printf '%s=%q\n' SELKIES_NATIVE_X_SERVER "${native_x_server}"
+    printf '%s=%q\n' SELKIES_NATIVE_DESKTOP "${SELKIES_NATIVE_DESKTOP}"
+    printf '%s=%q\n' SELKIES_ENABLE_BASIC_AUTH "${SELKIES_ENABLE_BASIC_AUTH}"
+    printf '%s=%q\n' SELKIES_BASIC_AUTH_USER "${SELKIES_BASIC_AUTH_USER}"
+    printf '%s=%q\n' SELKIES_BASIC_AUTH_PASSWORD "${REMOTE_DESKTOP_PASSWORD}"
+    printf '%s=%q\n' SELKIES_TURN_HOST "${SELKIES_TURN_HOST}"
+    printf '%s=%q\n' SELKIES_TURN_HOST_SOURCE "${SELKIES_TURN_HOST_SOURCE}"
+    printf '%s=%q\n' SELKIES_TURN_EXTERNAL_IP "${SELKIES_TURN_EXTERNAL_IP}"
+    printf '%s=%q\n' SELKIES_AUTO_TURN_HOST "${SELKIES_AUTO_TURN_HOST}"
+    printf '%s=%q\n' PUBLIC_IP_URLS "${PUBLIC_IP_URLS}"
+    printf '%s=%q\n' SELKIES_TURN_PORT "${SELKIES_TURN_PORT}"
+    printf '%s=%q\n' SELKIES_TURN_PROTOCOL "${SELKIES_TURN_PROTOCOL}"
+    printf '%s=%q\n' SELKIES_TURN_USERNAME "${SELKIES_TURN_USERNAME}"
+    printf '%s=%q\n' SELKIES_TURN_PASSWORD "${SELKIES_TURN_PASSWORD}"
+    printf '%s=%q\n' SELKIES_DISPLAY_WIDTH "${SELKIES_DISPLAY_WIDTH}"
+    printf '%s=%q\n' SELKIES_DISPLAY_HEIGHT "${SELKIES_DISPLAY_HEIGHT}"
+  } > /etc/brev-selkies-desktop/native.env
   chown "root:${native_group}" /etc/brev-selkies-desktop/native.env
   chmod 640 /etc/brev-selkies-desktop/native.env
 
@@ -906,6 +938,7 @@ EOF
 set -euo pipefail
 
 . /etc/brev-selkies-desktop/native.env
+cd ~
 
 export DISPLAY="${SELKIES_NATIVE_DISPLAY}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/selkies-runtime-${USER}}"
@@ -961,25 +994,25 @@ case "${SELKIES_NATIVE_DESKTOP}" in
   xfce) start_xfce_desktop ;;
 esac
 
-if [[ -r "${SELKIES_NATIVE_DIR}/gst-env" ]]; then
-  # shellcheck disable=SC1091
-  . "${SELKIES_NATIVE_DIR}/gst-env"
-fi
-
-exec "${SELKIES_NATIVE_DIR}/selkies-gstreamer-run" \
+use_cpu=false
+[[ "$SELKIES_ACCELERATION" == software ]] && use_cpu=true
+exec "${SELKIES_NATIVE_DIR}/AppRun" \
   --addr=0.0.0.0 \
   --port="${SELKIES_WEB_PORT}" \
-  --enable_https=false \
-  --enable_basic_auth="${SELKIES_ENABLE_BASIC_AUTH}" \
-  --basic_auth_user="${SELKIES_BASIC_AUTH_USER}" \
-  --basic_auth_password="${SELKIES_BASIC_AUTH_PASSWORD}" \
+  --mode=webrtc \
+  --enable-https=false \
+  --enable-basic-auth="${SELKIES_ENABLE_BASIC_AUTH}" \
+  --basic-auth-user="${SELKIES_BASIC_AUTH_USER}" \
+  --basic-auth-password="${SELKIES_BASIC_AUTH_PASSWORD}" \
   --encoder="${SELKIES_ENCODER}" \
-  --enable_resize=true \
-  --turn_host="${SELKIES_TURN_HOST}" \
-  --turn_port="${SELKIES_TURN_PORT}" \
-  --turn_protocol="${SELKIES_TURN_PROTOCOL}" \
-  --turn_username="${SELKIES_TURN_USERNAME}" \
-  --turn_password="${SELKIES_TURN_PASSWORD}"
+  --use-cpu="${use_cpu}" \
+  --enable-resize=true \
+  --turn-host="${SELKIES_TURN_HOST}" \
+  --turn-port="${SELKIES_TURN_PORT}" \
+  --turn-protocol="${SELKIES_TURN_PROTOCOL}" \
+  --turn-shared-secret= \
+  --turn-username="${SELKIES_TURN_USERNAME}" \
+  --turn-password="${SELKIES_TURN_PASSWORD}"
 EOF
   chmod 755 /usr/local/bin/brev-selkies-user-session
 
@@ -1003,6 +1036,117 @@ EOF
   systemctl daemon-reload
   systemctl enable brev-selkies-native.service
   systemctl restart brev-selkies-native.service
+}
+
+# Run user-owned tooling without inheriting a caller's Python/ROS environment.
+workspace_as_user() {
+  runuser -u "$SELKIES_NATIVE_USER" -- env \
+    -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV -u CONDA_PREFIX \
+    -u ROS_DISTRO -u AMENT_PREFIX_PATH -u CMAKE_PREFIX_PATH \
+    -u LD_LIBRARY_PATH -u LD_PRELOAD -u XDG_CACHE_HOME \
+    -u XDG_CONFIG_HOME -u XDG_DATA_HOME \
+    bash -c 'cd ~; exec "$@"' bash "$@"
+}
+
+workspace_ros_distro() {
+  case "$(ubuntu_version)" in
+    22.04) printf '%s\n' humble ;;
+    24.04) printf '%s\n' jazzy ;;
+  esac
+}
+
+install_workspace_tools() {
+  local staging
+  staging="$(mktemp -d)"
+  curl -fsSL --retry 3 https://astral.sh/uv/install.sh -o "$staging/uv.sh"
+  UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh "$staging/uv.sh"
+  curl -fsSL --retry 3 https://pixi.sh/install.sh -o "$staging/pixi.sh"
+  PIXI_BIN_DIR=/usr/local/bin PIXI_NO_PATH_UPDATE=1 bash "$staging/pixi.sh"
+  rm -rf "$staging"
+}
+
+install_workspace_ros() {
+  local distro="$1" codename release staging
+  case "$distro" in
+    humble) codename=jammy ;;
+    jazzy) codename=noble ;;
+  esac
+  apt_install software-properties-common locales curl ca-certificates jq
+  add-apt-repository -y universe
+  locale-gen en_US.UTF-8
+  export LANG=en_US.UTF-8
+  release="$(curl -fsSL --retry 3 https://api.github.com/repos/ros-infrastructure/ros-apt-source/releases/latest | jq -er '.tag_name')"
+  [[ "$release" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Unexpected ros-apt-source release: $release"
+  staging="$(mktemp -d)"
+  curl -fsSL --retry 3 \
+    "https://github.com/ros-infrastructure/ros-apt-source/releases/download/${release}/ros2-apt-source_${release}.${codename}_all.deb" \
+    -o "$staging/ros2-apt-source.deb"
+  dpkg -i "$staging/ros2-apt-source.deb"
+  rm -rf "$staging"
+  APT_UPDATED=0
+  apt_install "ros-${distro}-desktop" "ros-${distro}-rmw-fastrtps-cpp" \
+    ros-dev-tools build-essential git
+  if [[ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]]; then
+    rosdep init
+  fi
+  workspace_as_user rosdep update --rosdistro "$distro"
+}
+
+install_native_workspace() {
+  local distro
+  ubuntu_version >/dev/null
+  [[ "$(dpkg --print-architecture)" == amd64 ]] || die "This Isaac Sim workspace currently requires x86_64 Ubuntu"
+  id "$SELKIES_NATIVE_USER" >/dev/null 2>&1 || die "Workspace user '${SELKIES_NATIVE_USER}' does not exist"
+  distro="$(workspace_ros_distro)"
+  log "Setting up uv, Pixi, Isaac Sim 6.2, and ROS 2 ${distro} for ${SELKIES_NATIVE_USER}"
+  apt_install ca-certificates curl libgomp1 libvulkan1 vulkan-tools
+  install_workspace_tools
+  install_workspace_ros "$distro"
+  workspace_as_user bash -s -- "$distro" <<'WORKSPACE'
+set -euo pipefail
+cd ~
+distro="$1"
+workspace_dir="$HOME/robotics"
+sim_env="$workspace_dir/isaacsim-6.2/.venv"
+mkdir -p "$workspace_dir/ros2_ws/src" "$HOME/.local/bin"
+if [[ ! -x "$sim_env/bin/python" ]]; then
+  /usr/local/bin/uv venv --python 3.12 --seed "$sim_env"
+fi
+# Use pip's index behavior as documented by NVIDIA, inside the uv-created venv.
+"$sim_env/bin/python" -m pip install 'torch==2.11.0' --index-url https://download.pytorch.org/whl/cu128
+"$sim_env/bin/python" -m pip install 'isaacsim[all,extscache,ros2]==6.2.0.0' --extra-index-url https://pypi.nvidia.com
+"$sim_env/bin/python" -m pip check
+cat > "$HOME/.local/bin/isaacsim" <<'LAUNCH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${ROS_DISTRO:-}" == humble ]]; then
+  echo 'Launch Isaac Sim from a fresh terminal without sourcing Humble (Python 3.10).' >&2
+  exit 1
+fi
+exec "$HOME/robotics/isaacsim-6.2/.venv/bin/isaacsim" --enable isaacsim.ros2.bridge "$@"
+LAUNCH
+chmod +x "$HOME/.local/bin/isaacsim"
+printf 'source /opt/ros/%s/setup.bash\n' "$distro" > "$workspace_dir/ros2_ws/activate.bash"
+cat >> "$workspace_dir/ros2_ws/activate.bash" <<'ROS'
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+if [[ -f "$HOME/robotics/ros2_ws/install/local_setup.bash" ]]; then
+  source "$HOME/robotics/ros2_ws/install/local_setup.bash"
+fi
+ROS
+path_line='export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"'
+for profile in "$HOME/.bashrc" "$HOME/.profile"; do
+  touch "$profile"
+  if ! grep -Fqx "$path_line" "$profile"; then
+    printf '\n%s\n' "$path_line" >> "$profile"
+  fi
+done
+/usr/local/bin/uv --version
+/usr/local/bin/pixi --version
+# Metadata checks do not launch Kit or require a GPU/display/EULA prompt.
+"$sim_env/bin/python" -c 'from importlib.metadata import version; assert version("isaacsim") == "6.2.0.0"; print("Isaac Sim", version("isaacsim"))'
+bash -c 'source "$1"; ros2 --help >/dev/null' bash "$workspace_dir/ros2_ws/activate.bash"
+WORKSPACE
+  log "Workspace ready: run isaacsim in a fresh desktop terminal; source ~/robotics/ros2_ws/activate.bash in a separate ROS terminal."
 }
 
 install_container_desktop() {
@@ -1108,6 +1252,11 @@ main() {
       usage
       exit 0
       ;;
+    --setup-workspace)
+      require_root
+      install_native_workspace
+      exit 0
+      ;;
     --print-config)
       validate_config
       print_config
@@ -1134,6 +1283,10 @@ main() {
   log_acceleration_resolution "$acceleration"
   log "Selkies encoder selected: ${encoder}"
 
+  if [[ "$SELKIES_DEPLOYMENT" == native ]]; then
+    prepare_native_runtime "$version"
+  fi
+
   resolve_turn_host
   configure_ufw
   stop_existing_deployments
@@ -1148,6 +1301,9 @@ main() {
   esac
 
   healthcheck
+  if [[ "$SELKIES_DEPLOYMENT" == native ]] && is_truthy "$SELKIES_NATIVE_WORKSPACE"; then
+    install_native_workspace
+  fi
   log "Selkies desktop is ready. Expose ${SELKIES_WEB_PORT}/tcp as the Brev Secure Link."
   if [[ "$SELKIES_MODE" == "webrtc" ]]; then
     log "Also expose ${SELKIES_TURN_PORT}/udp and ${SELKIES_TURN_MIN_PORT}-${SELKIES_TURN_MAX_PORT}/udp for WebRTC TURN."
