@@ -21,7 +21,7 @@ set -euo pipefail
 
 export SELKIES_ACCELERATION=auto
 export SELKIES_DEPLOYMENT=native
-export SELKIES_MODE=websockets
+export SELKIES_MODE=webrtc
 export SELKIES_NATIVE_WORKSPACE=1
 
 curl -fsSL "https://raw.githubusercontent.com/liorbenhorin/brev-selkies-desktop/main/assets/brev-selkies-desktop.sh" | sudo -E bash
@@ -29,7 +29,7 @@ curl -fsSL "https://raw.githubusercontent.com/liorbenhorin/brev-selkies-desktop/
 
 In the Brev Launchable builder, select **VM Mode**, use this fork as the source repository, and paste the script above into the setup script field. These are separate settings: changing the repository does not change a hardcoded setup URL. Use an RTX-capable GPU such as the tested `g7e.4xlarge` (RTX PRO 6000), with at least 250 GiB disk; 500 GiB gives more room for assets.
 
-For this WebSocket configuration, add one authenticated **Secure Link** named `desktop`, targeting port **8080**, and leave custom TCP/UDP ports empty. Open the Secure Link after setup completes. No TURN ports are needed. This does not select the host Ubuntu version: the installer uses Humble on 22.04 and Jazzy on 24.04.
+For WebRTC, add one authenticated **Secure Link** named `desktop`, targeting port **8080**, expose **UDP 47999**, and complete the per-instance gateway mapping step under **WebRTC through a mapped Brev UDP port** below. The setup script alone cannot know the public gateway port assigned by Brev. For the simpler single-link alternative, set `SELKIES_MODE=websockets` and leave custom TCP/UDP ports empty. This does not select the host Ubuntu version: the installer uses Humble on 22.04 and Jazzy on 24.04.
 
 ## Modes
 
@@ -63,7 +63,7 @@ In container mode, hardware also requires a healthy NVIDIA container runtime and
 `SELKIES_MODE` controls the browser transport:
 
 - `webrtc`, default: lower-latency Selkies WebRTC. Requires `8080/tcp` plus TURN UDP ports.
-- `websockets`: recommended for native Brev deployments; streams through the authenticated Secure Link on `8080`, without TURN or exposed UDP ports. The Launchable example explicitly selects this mode.
+- `websockets`: single-link alternative for native Brev deployments; streams through the authenticated Secure Link on `8080`, without TURN or exposed UDP ports.
 - `kasmvnc`: container-only single-port fallback over `8080/tcp`.
 
 ## Ports
@@ -76,7 +76,26 @@ WebRTC requires direct, port-preserving network access:
 - `47998/udp`: Selkies internal TURN listener.
 - `47999-48015/udp`: compact Selkies TURN relay range.
 
-**Brev public port mappings may change both the hostname and port numbers.** For example, a public gateway port `30310` may forward to VM port `47999`. The current local TURN configuration assumes direct access to the VM public IP and unchanged relay port numbers; those remapped ports do not satisfy that requirement. Adding the full UDP range alone will not fix it. Use WebSocket streaming for these deployments, or arrange compatible direct networking/external TURN before choosing WebRTC. Inspect the actual mappings with `brev ports ls <instance> --json`.
+**Brev public port mappings may change both the hostname and port numbers.** For example, a public gateway port `30310` may forward to VM port `47999`. The local TURN configuration assumes direct access to the VM public IP and unchanged relay port numbers; those remapped ports do not satisfy that requirement. Adding the full UDP range alone will not fix it. Use the single-port WebRTC setup below for Brev gateway mappings, WebSocket streaming, or compatible direct networking/external TURN.
+
+### WebRTC through a mapped Brev UDP port
+
+The native Selkies 2.1 runtime supports single-port UDP multiplexing and ICE-lite. This was tested through a Brev gateway: the browser completed ICE and the server started NVENC H.264 capture. It avoids the local TURN relay range by advertising the gateway IP and public port. A narrow local translation forwards Brev's destination port to Selkies' listening port; systemd reapplies it on service startup.
+
+1. Use the Launchable script above with `SELKIES_MODE=webrtc`.
+2. Keep the authenticated `desktop` Secure Link on **8080**, and expose **one UDP destination port**, e.g. **47999**.
+3. After deployment, run `brev ports ls <instance> --json` on your computer. Find the UDP entry's `endpoint`, `public_port`, and `destination_port`.
+4. SSH to the VM and run the helper with that instance's mapping:
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/liorbenhorin/brev-selkies-desktop/main/assets/configure-brev-webrtc.sh -o /tmp/configure-brev-webrtc.sh
+   # Example only: replace the hostname and both ports with your actual mapping.
+   sudo bash /tmp/configure-brev-webrtc.sh global.prd.ga.run.brev.nvidia.com 30310 47999
+   ```
+
+5. Open or reload the desktop Secure Link. This restarts the desktop service, so save work first when reconfiguring an existing session.
+
+Public ports are assigned per deployment: **do not hardcode this example in a new Launchable**. Repeat the mapping step for each new instance or when its gateway mapping changes. The helper resolves the gateway's IPv4 address at configuration time. It does not create cloud port rules or change their access restrictions. Restrictive client networks that block UDP may still require TURN or WebSocket streaming. If UFW is active, allow the selected destination and local mux UDP ports for the intended clients; the helper does not broaden firewall policy.
 
 Do not shrink the relay range to only one or two ports. Reconnects can leave old TURN allocations around briefly, and a too-small relay range can fail with coturn `error 508: Cannot create socket` / `no available ports`. The script now requires at least eight relay ports by default.
 
