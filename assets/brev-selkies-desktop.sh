@@ -91,7 +91,8 @@ Core settings:
   SELKIES_NATIVE_DESKTOP=ubuntu|xfce
     Native deployment only. ubuntu starts the familiar Ubuntu GNOME desktop
     with the left dock. xfce keeps the lighter legacy desktop.
-  SELKIES_MODE=webrtc|kasmvnc
+  SELKIES_MODE=websockets|webrtc|kasmvnc
+    websockets is native-only and streams through the 8080 Secure Link.
     webrtc uses 8080/tcp plus TURN ports.
     kasmvnc uses only 8080/tcp and is the last-resort single-port mode.
   SELKIES_ENCODER=<gstreamer encoder>
@@ -148,8 +149,8 @@ validate_config() {
     *) die "SELKIES_DEPLOYMENT must be container or native; got '${SELKIES_DEPLOYMENT}'" ;;
   esac
   case "$SELKIES_MODE" in
-    webrtc|kasmvnc) ;;
-    *) die "SELKIES_MODE must be webrtc or kasmvnc; got '${SELKIES_MODE}'" ;;
+    websockets|webrtc|kasmvnc) ;;
+    *) die "SELKIES_MODE must be websockets, webrtc, or kasmvnc; got '${SELKIES_MODE}'" ;;
   esac
   case "$SELKIES_ACCELERATION" in
     auto|hardware|software) ;;
@@ -172,12 +173,15 @@ validate_config() {
     *) die "SELKIES_NATIVE_DESKTOP must be ubuntu or xfce; got '${SELKIES_NATIVE_DESKTOP}'" ;;
   esac
   if [[ "$SELKIES_DEPLOYMENT" == native ]]; then
-    [[ "$SELKIES_MODE" == webrtc ]] || die "Native deployment supports webrtc only"
+    [[ "$SELKIES_MODE" == webrtc || "$SELKIES_MODE" == websockets ]] || die "Native deployment supports webrtc or websockets"
     [[ "${SELKIES_NATIVE_VERSION#v}" =~ ^2\.[0-9]+\.[0-9]+$ ]] || die "Native deployment requires a Selkies 2.x release, such as 2.1.0"
     [[ "$SELKIES_NATIVE_DIR" == /opt/* && "$SELKIES_NATIVE_DIR" != *..* && "$SELKIES_NATIVE_DIR" != /opt/ ]] || die "SELKIES_NATIVE_DIR must be a directory below /opt"
     if is_truthy "$SELKIES_ENABLE_BASIC_AUTH"; then
       [[ -n "$REMOTE_DESKTOP_PASSWORD" ]] || die "REMOTE_DESKTOP_PASSWORD is required when basic auth is enabled"
     fi
+  fi
+  if [[ "$SELKIES_DEPLOYMENT" == container && "$SELKIES_MODE" == websockets ]]; then
+    die "WebSocket streaming requires SELKIES_DEPLOYMENT=native"
   fi
   [[ "$SELKIES_TURN_MIN_PORT" =~ ^[0-9]+$ ]] || die "SELKIES_TURN_MIN_PORT must be numeric"
   [[ "$SELKIES_TURN_MAX_PORT" =~ ^[0-9]+$ ]] || die "SELKIES_TURN_MAX_PORT must be numeric"
@@ -1001,7 +1005,7 @@ use_cpu=false
 exec "${SELKIES_NATIVE_DIR}/AppRun" \
   --addr=0.0.0.0 \
   --port="${SELKIES_WEB_PORT}" \
-  --mode=webrtc \
+  --mode="${SELKIES_MODE}" \
   --enable-https=false \
   --enable-basic-auth="${SELKIES_ENABLE_BASIC_AUTH}" \
   --basic-auth-user="${SELKIES_BASIC_AUTH_USER}" \

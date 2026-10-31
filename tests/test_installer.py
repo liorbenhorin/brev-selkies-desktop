@@ -34,6 +34,29 @@ class InstallerTests(unittest.TestCase):
         result = bash('SELKIES_DEPLOYMENT=container; resolve_encoder hardware; resolve_encoder software', SELKIES_ENCODER='')
         self.assertEqual(result.stdout.splitlines(), ['nvh264enc', 'x264enc'])
 
+    def test_transport_compatibility(self):
+        for deployment, mode, valid in (
+            ('native', 'websockets', True), ('native', 'webrtc', True),
+            ('native', 'kasmvnc', False), ('container', 'websockets', False),
+            ('container', 'kasmvnc', True), ('container', 'webrtc', True),
+        ):
+            with self.subTest(deployment=deployment, mode=mode):
+                result = bash('validate_config', SELKIES_DEPLOYMENT=deployment, SELKIES_MODE=mode)
+                self.assertEqual(result.returncode == 0, valid, result.stdout + result.stderr)
+
+    def test_native_launcher_passes_selected_transport(self):
+        session = SOURCE.split("cat > /usr/local/bin/brev-selkies-user-session <<'EOF'\n", 1)[1].split('\nEOF', 1)[0]
+        command = session[session.index('use_cpu=false'):]
+        with tempfile.TemporaryDirectory() as temp:
+            app = Path(temp, 'AppRun')
+            app.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+            app.chmod(0o755)
+            for mode in ('websockets', 'webrtc'):
+                result = bash('SELKIES_BASIC_AUTH_PASSWORD=""\n' + command,
+                              SELKIES_MODE=mode, SELKIES_NATIVE_DIR=temp)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('--mode=' + mode, result.stdout.splitlines())
+
     def test_ros_distro_matches_ubuntu(self):
         result = bash('ubuntu_version() { echo 22.04; }; workspace_ros_distro; ubuntu_version() { echo 24.04; }; workspace_ros_distro')
         self.assertEqual(result.stdout.splitlines(), ['humble', 'jazzy'])

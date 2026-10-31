@@ -21,10 +21,15 @@ set -euo pipefail
 
 export SELKIES_ACCELERATION=auto
 export SELKIES_DEPLOYMENT=native
-export SELKIES_MODE=webrtc
+export SELKIES_MODE=websockets
+export SELKIES_NATIVE_WORKSPACE=1
 
 curl -fsSL "https://raw.githubusercontent.com/liorbenhorin/brev-selkies-desktop/main/assets/brev-selkies-desktop.sh" | sudo -E bash
 ```
+
+In the Brev Launchable builder, select **VM Mode**, use this fork as the source repository, and paste the script above into the setup script field. These are separate settings: changing the repository does not change a hardcoded setup URL. Use an RTX-capable GPU such as the tested `g7e.4xlarge` (RTX PRO 6000), with at least 250 GiB disk; 500 GiB gives more room for assets.
+
+For this WebSocket configuration, add one authenticated **Secure Link** named `desktop`, targeting port **8080**, and leave custom TCP/UDP ports empty. Open the Secure Link after setup completes. No TURN ports are needed. This does not select the host Ubuntu version: the installer uses Humble on 22.04 and Jazzy on 24.04.
 
 ## Modes
 
@@ -58,15 +63,20 @@ In container mode, hardware also requires a healthy NVIDIA container runtime and
 `SELKIES_MODE` controls the browser transport:
 
 - `webrtc`, default: lower-latency Selkies WebRTC. Requires `8080/tcp` plus TURN UDP ports.
+- `websockets`: recommended for native Brev deployments; streams through the authenticated Secure Link on `8080`, without TURN or exposed UDP ports. The Launchable example explicitly selects this mode.
 - `kasmvnc`: container-only single-port fallback over `8080/tcp`.
 
 ## Ports
 
-Default WebRTC Launchable ports:
+For native WebSocket streaming, configure only the authenticated `desktop` Secure Link on port `8080`.
+
+WebRTC requires direct, port-preserving network access:
 
 - `8080/tcp`: Brev Secure Link, usually named `desktop`.
 - `47998/udp`: Selkies internal TURN listener.
 - `47999-48015/udp`: compact Selkies TURN relay range.
+
+**Brev public port mappings may change both the hostname and port numbers.** For example, a public gateway port `30310` may forward to VM port `47999`. The current local TURN configuration assumes direct access to the VM public IP and unchanged relay port numbers; those remapped ports do not satisfy that requirement. Adding the full UDP range alone will not fix it. Use WebSocket streaming for these deployments, or arrange compatible direct networking/external TURN before choosing WebRTC. Inspect the actual mappings with `brev ports ls <instance> --json`.
 
 Do not shrink the relay range to only one or two ports. Reconnects can leave old TURN allocations around briefly, and a too-small relay range can fail with coturn `error 508: Cannot create socket` / `no available ports`. The script now requires at least eight relay ports by default.
 
@@ -74,7 +84,7 @@ For `SELKIES_MODE=kasmvnc`, expose only:
 
 - `8080/tcp`
 
-If TCP TURN is needed, set `SELKIES_TURN_ENABLE_TCP=1` and also expose `47998/tcp` plus `47999-48000/tcp`.
+If the client needs TURN over TCP, set `SELKIES_TURN_PROTOCOL=tcp` and expose the TCP listener on `47998`. Browser TURN still needs the UDP relay range `47999-48015` with unchanged public port numbers.
 
 ## Common Configuration
 
@@ -105,7 +115,7 @@ export SELKIES_ACCELERATION=auto
 export SELKIES_MODE=webrtc
 ```
 
-Native mode installs `coturn` and Firefox on the host and uses the same default Launchable ports. It intentionally avoids the all-in-one Selkies desktop container so Docker commands inside the streamed desktop operate on the Brev host naturally. Firefox is installed from Mozilla's apt repository so the desktop gets a real `.deb` browser instead of Ubuntu's snap transition package.
+Native mode installs `coturn` and Firefox on the host. WebSocket mode only needs the desktop Secure Link; WebRTC additionally needs compatible TURN networking. It intentionally avoids the all-in-one Selkies desktop container so Docker commands inside the streamed desktop operate on the Brev host naturally. Firefox is installed from Mozilla's apt repository so the desktop gets a real `.deb` browser instead of Ubuntu's snap transition package.
 
 When `SELKIES_TURN_HOST` is auto-detected, native mode refreshes the advertised TURN host and coturn `external-ip` each time the systemd service starts. This keeps WebRTC reconnects working after a provider stop/start changes the instance public IP.
 
