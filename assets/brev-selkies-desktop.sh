@@ -764,6 +764,8 @@ install_native_desktop() {
   log "Installing verified Selkies ${version} runtime at ${SELKIES_NATIVE_DIR}"
   mkdir -p "$SELKIES_NATIVE_DIR"
   cp -a "${NATIVE_STAGING}/squashfs-root/." "$SELKIES_NATIVE_DIR/"
+  # AppImage extraction can leave the root directory private to the installer.
+  chmod -R a+rX "$SELKIES_NATIVE_DIR"
   rm -rf -- "$NATIVE_STAGING"
   NATIVE_STAGING=""
 
@@ -1059,9 +1061,9 @@ install_workspace_tools() {
   local staging
   staging="$(mktemp -d)"
   curl -fsSL --retry 3 https://astral.sh/uv/install.sh -o "$staging/uv.sh"
-  UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh "$staging/uv.sh"
+  runuser -u root -- env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh "$staging/uv.sh"
   curl -fsSL --retry 3 https://pixi.sh/install.sh -o "$staging/pixi.sh"
-  PIXI_BIN_DIR=/usr/local/bin PIXI_NO_PATH_UPDATE=1 bash "$staging/pixi.sh"
+  runuser -u root -- env PIXI_BIN_DIR=/usr/local/bin PIXI_NO_PATH_UPDATE=1 bash "$staging/pixi.sh"
   rm -rf "$staging"
 }
 
