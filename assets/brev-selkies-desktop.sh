@@ -716,6 +716,25 @@ prepare_native_runtime() {
   chmod +x "${NATIVE_STAGING}/${asset}"
   (cd "$NATIVE_STAGING" && "./${asset}" --appimage-extract >/dev/null)
   [[ -x "${NATIVE_STAGING}/squashfs-root/AppRun" ]] || die "Selkies AppImage has no executable AppRun"
+  if [[ "$SELKIES_NATIVE_DESKTOP" == ubuntu ]]; then
+    stage_native_wallpaper
+  fi
+}
+
+stage_native_wallpaper() {
+  local filename=GTC2018-Wallpaper-16x9-1080.jpg source_dir
+  source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+  # Support both a repository checkout and the Launchable's curl | bash entrypoint.
+  if [[ -f "$source_dir/$filename" ]]; then
+    cp -- "$source_dir/$filename" "$NATIVE_STAGING/wallpaper.jpg"
+  else
+    curl -fSL --retry 3 \
+      "https://raw.githubusercontent.com/liorbenhorin/brev-selkies-desktop/main/$filename" \
+      -o "$NATIVE_STAGING/wallpaper.jpg"
+  fi
+  printf '%s  %s\n' \
+    1e8d601927f6f842b4170ad8fc02828d8cede01622cdbfe65ea46fe038146383 \
+    "$NATIVE_STAGING/wallpaper.jpg" | sha256sum --check -
 }
 
 install_native_desktop() {
@@ -770,6 +789,9 @@ install_native_desktop() {
   cp -a "${NATIVE_STAGING}/squashfs-root/." "$SELKIES_NATIVE_DIR/"
   # AppImage extraction can leave the root directory private to the installer.
   chmod -R a+rX "$SELKIES_NATIVE_DIR"
+  if [[ "$SELKIES_NATIVE_DESKTOP" == ubuntu ]]; then
+    install -D -m 644 "$NATIVE_STAGING/wallpaper.jpg" /usr/local/share/backgrounds/brev-selkies-wallpaper.jpg
+  fi
   rm -rf -- "$NATIVE_STAGING"
   NATIVE_STAGING=""
 
@@ -973,6 +995,11 @@ start_ubuntu_desktop() {
   export XDG_SESSION_TYPE=x11
 
   xdg-user-dirs-update >/dev/null 2>&1 || true
+  if [[ -r /usr/local/share/backgrounds/brev-selkies-wallpaper.jpg ]]; then
+    gsettings set org.gnome.desktop.background picture-uri 'file:///usr/local/share/backgrounds/brev-selkies-wallpaper.jpg'
+    gsettings set org.gnome.desktop.background picture-uri-dark 'file:///usr/local/share/backgrounds/brev-selkies-wallpaper.jpg'
+    gsettings set org.gnome.desktop.background picture-options 'zoom'
+  fi
   gsettings set org.gnome.desktop.interface gtk-theme 'Yaru' >/dev/null 2>&1 || true
   gsettings set org.gnome.desktop.interface icon-theme 'Yaru' >/dev/null 2>&1 || true
   gsettings set org.gnome.desktop.interface cursor-theme 'Yaru' >/dev/null 2>&1 || true

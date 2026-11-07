@@ -144,6 +144,13 @@ Native mode defaults to the familiar Ubuntu GNOME desktop with Yaru styling and 
 export SELKIES_NATIVE_DESKTOP=ubuntu
 ```
 
+The native Ubuntu desktop uses the repository's `GTC2018-Wallpaper-16x9-1080.jpg`
+as its wallpaper in both light and dark themes, scaled to fill the screen. The
+installer verifies and copies it to `/usr/local/share/backgrounds/brev-selkies-wallpaper.jpg`
+and applies it whenever the desktop session starts. Piped Launchable installs
+download the image from this repository's `main` branch, so publish the image
+alongside the installer when updating the Launchable.
+
 The previous lightweight desktop remains available when install size or simplicity matters more than appearance:
 
 ```bash
